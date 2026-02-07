@@ -1,0 +1,1092 @@
+-- Pub Shi Insta Steal - Extraordinary Modern GUI by DQ
+-- Features: Animated gradients, glassmorphism, particle effects, smooth transitions
+
+local CONFIG = {
+    AUTO_STEAL_NEAREST = false,
+}
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+local AnimalsData = require(ReplicatedStorage:WaitForChild("Datas"):WaitForChild("Animals"))
+
+-- Core Variables
+local allAnimalsCache = {}
+local PromptMemoryCache = {}
+local InternalStealCache = {}
+local LastTargetUID = nil
+local LastPlayerPosition = nil
+local PlayerVelocity = Vector3.zero
+local AUTO_STEAL_PROX_RADIUS = 25
+local IsStealing = false
+local StealProgress = 0
+local CurrentStealTarget = nil
+local StealStartTime = 0
+
+-- Visual Effects
+local CIRCLE_RADIUS = AUTO_STEAL_PROX_RADIUS
+local PART_THICKNESS = 0.25
+local PART_HEIGHT = 0.15
+local PART_COLOR = Color3.fromRGB(255, 255, 255)
+local PartsCount = 80
+local circleParts = {}
+local circleEnabled = true
+local stealConnection = nil
+local velocityConnection = nil
+
+-- ============================================
+-- CORE FUNCTIONS (Unchanged)
+-- ============================================
+
+local function getHRP()
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    return char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("UpperTorso")
+end
+
+local function isMyBase(plotName)
+    local plot = workspace.Plots:FindFirstChild(plotName)
+    if not plot then return false end
+    local sign = plot:FindFirstChild("PlotSign")
+    if sign then
+        local yourBase = sign:FindFirstChild("YourBase")
+        if yourBase and yourBase:IsA("BillboardGui") then
+            return yourBase.Enabled == true
+        end
+    end
+    return false
+end
+
+local function scanSinglePlot(plot)
+    if not plot or not plot:IsA("Model") then return end
+    if isMyBase(plot.Name) then return end
+    
+    local podiums = plot:FindFirstChild("AnimalPodiums")
+    if not podiums then return end
+    
+    for _, podium in ipairs(podiums:GetChildren()) do
+        if podium:IsA("Model") and podium:FindFirstChild("Base") then
+            local animalName = "Unknown"
+            local spawn = podium.Base:FindFirstChild("Spawn")
+            if spawn then
+                for _, child in ipairs(spawn:GetChildren()) do
+                    if child:IsA("Model") and child.Name ~= "PromptAttachment" then
+                        animalName = child.Name
+                        local animalInfo = AnimalsData[animalName]
+                        if animalInfo and animalInfo.DisplayName then
+                            animalName = animalInfo.DisplayName
+                        end
+                        break
+                    end
+                end
+            end
+            table.insert(allAnimalsCache, {
+                name = animalName,
+                plot = plot.Name,
+                slot = podium.Name,
+                worldPosition = podium:GetPivot().Position,
+                uid = plot.Name .. "_" .. podium.Name,
+            })
+        end
+    end
+end
+
+local function initializeScanner()
+    task.wait(2)
+    local plots = workspace:WaitForChild("Plots", 10)
+    if not plots then return end
+    
+    for _, plot in ipairs(plots:GetChildren()) do
+        if plot:IsA("Model") then
+            scanSinglePlot(plot)
+        end
+    end
+    
+    plots.ChildAdded:Connect(function(plot)
+        if plot:IsA("Model") then
+            task.wait(0.5)
+            scanSinglePlot(plot)
+        end
+    end)
+    
+    task.spawn(function()
+        while task.wait(5) do
+            allAnimalsCache = {}
+            for _, plot in ipairs(plots:GetChildren()) do
+                if plot:IsA("Model") then
+                    scanSinglePlot(plot)
+                end
+            end
+        end
+    end)
+end
+
+local function findProximityPromptForAnimal(animalData)
+    local plot = workspace.Plots:FindFirstChild(animalData.plot)
+    if not plot then return nil end
+    local podiums = plot:FindFirstChild("AnimalPodiums")
+    if not podiums then return nil end
+    local targetPodium = podiums:FindFirstChild(animalData.slot)
+    if not targetPodium then return nil end
+    return targetPodium:FindFirstChildOfClass("ProximityPrompt", true)
+end
+
+local function updatePlayerVelocity()
+    local hrp = getHRP()
+    if hrp then
+        local currentPos = hrp.Position
+        if LastPlayerPosition then
+            PlayerVelocity = (currentPos - LastPlayerPosition) / RunService.Heartbeat:Wait()
+        end
+        LastPlayerPosition = currentPos
+    end
+end
+
+local function shouldSteal(animalData)
+    if InternalStealCache[animalData.uid] then return false end
+    if LastTargetUID == animalData.uid then
+        local elapsed = tick() - (InternalStealCache[animalData.uid] or 0)
+        if elapsed < 15 then return false end
+    end
+    return true
+end
+
+local function buildStealCallbacks(prompt)
+    local triggered = false
+    local conn
+    conn = prompt.Triggered:Connect(function()
+        triggered = true
+        if conn then conn:Disconnect() end
+    end)
+    return function() return triggered end, conn
+end
+
+local function executeInternalStealAsync(prompt, animalData)
+    if IsStealing then return false end
+    
+    IsStealing = true
+    StealProgress = 0
+    CurrentStealTarget = animalData.name
+    StealStartTime = tick()
+    
+    InternalStealCache[animalData.uid] = tick()
+    LastTargetUID = animalData.uid
+    
+    local wasTriggered, conn = buildStealCallbacks(prompt)
+    local holdDuration = prompt.HoldDuration or 0.5
+    local checkInterval = 0.05
+    local maxAttempts = math.ceil(holdDuration / checkInterval) + 10
+    
+    prompt:InputHoldBegin()
+    
+    for i = 1, maxAttempts do
+        if wasTriggered() then
+            prompt:InputHoldEnd()
+            if conn then conn:Disconnect() end
+            IsStealing = false
+            StealProgress = 1
+            task.wait(0.3)
+            StealProgress = 0
+            return true
+        end
+        
+        StealProgress = math.min(1, i / maxAttempts)
+        task.wait(checkInterval)
+    end
+    
+    prompt:InputHoldEnd()
+    if conn then conn:Disconnect() end
+    IsStealing = false
+    StealProgress = 0
+    
+    return false
+end
+
+local function attemptSteal(prompt, animalData)
+    if not prompt then return false end
+    if not shouldSteal(animalData) then return false end
+    
+    local hrp = getHRP()
+    if not hrp then return false end
+    
+    local distance = (hrp.Position - animalData.worldPosition).Magnitude
+    if distance > AUTO_STEAL_PROX_RADIUS then return false end
+    
+    local success = executeInternalStealAsync(prompt, animalData)
+    return success
+end
+
+local function getNearestAnimal()
+    local hrp = getHRP()
+    if not hrp then return nil end
+    
+    local myPos = hrp.Position
+    local nearest = nil
+    local shortestDist = AUTO_STEAL_PROX_RADIUS
+    
+    for _, animalData in ipairs(allAnimalsCache) do
+        local dist = (myPos - animalData.worldPosition).Magnitude
+        if dist < shortestDist and shouldSteal(animalData) then
+            nearest = animalData
+            shortestDist = dist
+        end
+    end
+    
+    return nearest
+end
+
+local function autoStealLoop()
+    velocityConnection = RunService.Heartbeat:Connect(updatePlayerVelocity)
+    
+    stealConnection = RunService.Heartbeat:Connect(function()
+        if not CONFIG.AUTO_STEAL_NEAREST then return end
+        if IsStealing then return end
+        
+        local nearestAnimal = getNearestAnimal()
+        if nearestAnimal then
+            local prompt = findProximityPromptForAnimal(nearestAnimal)
+            if prompt then
+                attemptSteal(prompt, nearestAnimal)
+            end
+        end
+    end)
+end
+
+-- ============================================
+-- EXTRAORDINARY GUI SYSTEM
+-- ============================================
+
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "PubShiInstaSteal"
+screenGui.ResetOnSpawn = false
+screenGui.DisplayOrder = 1000000
+screenGui.IgnoreGuiInset = true
+screenGui.Parent = PlayerGui
+
+-- Particle System Container
+local particleContainer = Instance.new("Frame")
+particleContainer.Name = "ParticleContainer"
+particleContainer.Size = UDim2.new(1, 0, 1, 0)
+particleContainer.BackgroundTransparency = 1
+particleContainer.ClipsDescendants = false
+particleContainer.ZIndex = 1
+particleContainer.Parent = screenGui
+
+-- Floating Particles Background
+local particles = {}
+for i = 1, 25 do
+    local particle = Instance.new("Frame")
+    particle.Size = UDim2.new(0, math.random(3, 8), 0, math.random(3, 8))
+    particle.Position = UDim2.new(math.random(), 0, math.random(), 0)
+    particle.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    particle.BackgroundTransparency = math.random(70, 90) / 100
+    particle.BorderSizePixel = 0
+    particle.ZIndex = 1
+    particle.Parent = particleContainer
+    
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(1, 0)
+    corner.Parent = particle
+    
+    table.insert(particles, particle)
+end
+
+-- Animate particles
+task.spawn(function()
+    while true do
+        for _, particle in ipairs(particles) do
+            local randomDuration = math.random(40, 80) / 10
+            local randomX = math.random()
+            local randomY = math.random()
+            
+            TweenService:Create(particle, TweenInfo.new(randomDuration, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {
+                Position = UDim2.new(randomX, 0, randomY, 0),
+                BackgroundTransparency = math.random(60, 95) / 100
+            }):Play()
+        end
+        task.wait(5)
+    end
+end)
+
+-- Main Container with Advanced Glassmorphism
+local mainFrame = Instance.new("Frame")
+mainFrame.Name = "MainFrame"
+mainFrame.Size = UDim2.new(0, 380, 0, 520)
+mainFrame.Position = UDim2.new(0.5, -190, 0.5, -260)
+mainFrame.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+mainFrame.BackgroundTransparency = 0.08
+mainFrame.BorderSizePixel = 0
+mainFrame.ZIndex = 2
+mainFrame.Parent = screenGui
+
+-- Rounded Corners
+local mainCorner = Instance.new("UICorner")
+mainCorner.CornerRadius = UDim.new(0, 28)
+mainCorner.Parent = mainFrame
+
+-- Outer Glow Effect
+local outerGlow = Instance.new("ImageLabel")
+outerGlow.Name = "OuterGlow"
+outerGlow.Size = UDim2.new(1, 60, 1, 60)
+outerGlow.Position = UDim2.new(0.5, -30, 0.5, -30)
+outerGlow.AnchorPoint = Vector2.new(0.5, 0.5)
+outerGlow.BackgroundTransparency = 1
+outerGlow.Image = "rbxassetid://5554236805"
+outerGlow.ImageColor3 = Color3.fromRGB(255, 255, 255)
+outerGlow.ImageTransparency = 0.7
+outerGlow.ScaleType = Enum.ScaleType.Slice
+outerGlow.SliceCenter = Rect.new(23, 23, 277, 277)
+outerGlow.ZIndex = 1
+outerGlow.Parent = mainFrame
+
+-- Animated Border Gradient
+local borderStroke = Instance.new("UIStroke")
+borderStroke.Thickness = 2.5
+borderStroke.Color = Color3.fromRGB(255, 255, 255)
+borderStroke.Transparency = 0
+borderStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+borderStroke.Parent = mainFrame
+
+local borderGradient = Instance.new("UIGradient")
+borderGradient.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0.00, Color3.fromRGB(255, 255, 255)),
+    ColorSequenceKeypoint.new(0.25, Color3.fromRGB(230, 240, 255)),
+    ColorSequenceKeypoint.new(0.50, Color3.fromRGB(255, 250, 255)),
+    ColorSequenceKeypoint.new(0.75, Color3.fromRGB(240, 255, 250)),
+    ColorSequenceKeypoint.new(1.00, Color3.fromRGB(255, 255, 255))
+})
+borderGradient.Rotation = 0
+borderGradient.Parent = borderStroke
+
+-- Animate border gradient rotation
+task.spawn(function()
+    while true do
+        borderGradient.Rotation = (borderGradient.Rotation + 1) % 360
+        task.wait(0.03)
+    end
+end)
+
+-- Inner Gradient Background
+local innerGradient = Instance.new("UIGradient")
+innerGradient.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0.0, Color3.fromRGB(255, 255, 255)),
+    ColorSequenceKeypoint.new(0.5, Color3.fromRGB(248, 252, 255)),
+    ColorSequenceKeypoint.new(1.0, Color3.fromRGB(255, 255, 255))
+})
+innerGradient.Rotation = 135
+innerGradient.Parent = mainFrame
+
+-- Animate inner gradient
+task.spawn(function()
+    local offset = 0
+    while true do
+        offset = offset + 0.002
+        innerGradient.Offset = Vector2.new(math.sin(offset) * 0.1, math.cos(offset) * 0.1)
+        task.wait(0.03)
+    end
+end)
+
+-- Header Section
+local headerFrame = Instance.new("Frame")
+headerFrame.Size = UDim2.new(1, 0, 0, 100)
+headerFrame.BackgroundTransparency = 1
+headerFrame.ZIndex = 3
+headerFrame.Parent = mainFrame
+
+-- Title with Shimmer Effect
+local titleLabel = Instance.new("TextLabel")
+titleLabel.Size = UDim2.new(1, -40, 0, 40)
+titleLabel.Position = UDim2.new(0, 20, 0, 20)
+titleLabel.BackgroundTransparency = 1
+titleLabel.Text = "PUB SHI INSTA STEAL"
+titleLabel.Font = Enum.Font.GothamBold
+titleLabel.TextSize = 26
+titleLabel.TextColor3 = Color3.fromRGB(30, 30, 30)
+titleLabel.TextXAlignment = Enum.TextXAlignment.Center
+titleLabel.ZIndex = 3
+titleLabel.Parent = headerFrame
+
+-- Animated shimmer overlay
+local shimmerGradient = Instance.new("UIGradient")
+shimmerGradient.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0.0, Color3.fromRGB(30, 30, 30)),
+    ColorSequenceKeypoint.new(0.4, Color3.fromRGB(30, 30, 30)),
+    ColorSequenceKeypoint.new(0.5, Color3.fromRGB(120, 150, 200)),
+    ColorSequenceKeypoint.new(0.6, Color3.fromRGB(30, 30, 30)),
+    ColorSequenceKeypoint.new(1.0, Color3.fromRGB(30, 30, 30))
+})
+shimmerGradient.Offset = Vector2.new(-1, 0)
+shimmerGradient.Rotation = 0
+shimmerGradient.Parent = titleLabel
+
+-- Shimmer animation
+task.spawn(function()
+    while true do
+        TweenService:Create(shimmerGradient, TweenInfo.new(3, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, -1), {
+            Offset = Vector2.new(1, 0)
+        }):Play()
+        task.wait(3)
+    end
+end)
+
+-- Subtitle
+local subtitleLabel = Instance.new("TextLabel")
+subtitleLabel.Size = UDim2.new(1, -40, 0, 20)
+subtitleLabel.Position = UDim2.new(0, 20, 0, 65)
+subtitleLabel.BackgroundTransparency = 1
+subtitleLabel.Text = "Premium instant animal stealer"
+subtitleLabel.Font = Enum.Font.Gotham
+subtitleLabel.TextSize = 13
+subtitleLabel.TextColor3 = Color3.fromRGB(100, 100, 100)
+subtitleLabel.TextXAlignment = Enum.TextXAlignment.Center
+subtitleLabel.ZIndex = 3
+subtitleLabel.Parent = headerFrame
+
+-- Divider Line with Gradient
+local divider = Instance.new("Frame")
+divider.Size = UDim2.new(1, -60, 0, 1)
+divider.Position = UDim2.new(0, 30, 0, 95)
+divider.BackgroundColor3 = Color3.fromRGB(200, 200, 200)
+divider.BackgroundTransparency = 0.5
+divider.BorderSizePixel = 0
+divider.ZIndex = 3
+divider.Parent = headerFrame
+
+local dividerGradient = Instance.new("UIGradient")
+dividerGradient.Transparency = NumberSequence.new({
+    NumberSequenceKeypoint.new(0, 1),
+    NumberSequenceKeypoint.new(0.5, 0),
+    NumberSequenceKeypoint.new(1, 1)
+})
+dividerGradient.Parent = divider
+
+-- Toggle Button Section
+local toggleContainer = Instance.new("Frame")
+toggleContainer.Size = UDim2.new(1, -40, 0, 70)
+toggleContainer.Position = UDim2.new(0, 20, 0, 120)
+toggleContainer.BackgroundTransparency = 1
+toggleContainer.ZIndex = 3
+toggleContainer.Parent = mainFrame
+
+local toggleBtn = Instance.new("TextButton")
+toggleBtn.Size = UDim2.new(1, 0, 1, 0)
+toggleBtn.BackgroundColor3 = Color3.fromRGB(250, 252, 255)
+toggleBtn.AutoButtonColor = false
+toggleBtn.BorderSizePixel = 0
+toggleBtn.Text = ""
+toggleBtn.ZIndex = 4
+toggleBtn.Parent = toggleContainer
+
+local toggleCorner = Instance.new("UICorner")
+toggleCorner.CornerRadius = UDim.new(0, 18)
+toggleCorner.Parent = toggleBtn
+
+local toggleStroke = Instance.new("UIStroke")
+toggleStroke.Thickness = 2
+toggleStroke.Color = Color3.fromRGB(220, 225, 235)
+toggleStroke.Transparency = 0
+toggleStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+toggleStroke.Parent = toggleBtn
+
+local toggleGradient = Instance.new("UIGradient")
+toggleGradient.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(250, 252, 255)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(245, 248, 252))
+})
+toggleGradient.Rotation = 90
+toggleGradient.Parent = toggleBtn
+
+-- Toggle Status Indicator
+local statusIndicator = Instance.new("Frame")
+statusIndicator.Size = UDim2.new(0, 12, 0, 12)
+statusIndicator.Position = UDim2.new(0, 20, 0.5, -6)
+statusIndicator.BackgroundColor3 = Color3.fromRGB(200, 200, 200)
+statusIndicator.BorderSizePixel = 0
+statusIndicator.ZIndex = 5
+statusIndicator.Parent = toggleBtn
+
+local indicatorCorner = Instance.new("UICorner")
+indicatorCorner.CornerRadius = UDim.new(1, 0)
+indicatorCorner.Parent = statusIndicator
+
+-- Pulse effect on indicator
+task.spawn(function()
+    while true do
+        if CONFIG.AUTO_STEAL_NEAREST then
+            TweenService:Create(statusIndicator, TweenInfo.new(0.8, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true), {
+                BackgroundTransparency = 0.3
+            }):Play()
+        end
+        task.wait(0.8)
+    end
+end)
+
+-- Toggle Text
+local toggleText = Instance.new("TextLabel")
+toggleText.Size = UDim2.new(1, -80, 1, 0)
+toggleText.Position = UDim2.new(0, 40, 0, 0)
+toggleText.BackgroundTransparency = 1
+toggleText.Text = "ACTIVATE INSTA STEAL"
+toggleText.Font = Enum.Font.GothamBold
+toggleText.TextSize = 16
+toggleText.TextColor3 = Color3.fromRGB(80, 80, 80)
+toggleText.TextXAlignment = Enum.TextXAlignment.Left
+toggleText.ZIndex = 5
+toggleText.Parent = toggleBtn
+
+-- Toggle Icon
+local toggleIcon = Instance.new("TextLabel")
+toggleIcon.Size = UDim2.new(0, 40, 0, 40)
+toggleIcon.Position = UDim2.new(1, -55, 0.5, -20)
+toggleIcon.BackgroundTransparency = 1
+toggleIcon.Text = "○"
+toggleIcon.Font = Enum.Font.GothamBold
+toggleIcon.TextSize = 32
+toggleIcon.TextColor3 = Color3.fromRGB(200, 200, 200)
+toggleIcon.ZIndex = 5
+toggleIcon.Parent = toggleBtn
+
+-- Toggle Click Handler
+toggleBtn.MouseButton1Click:Connect(function()
+    CONFIG.AUTO_STEAL_NEAREST = not CONFIG.AUTO_STEAL_NEAREST
+    
+    local tweenInfo = TweenInfo.new(0.4, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+    
+    if CONFIG.AUTO_STEAL_NEAREST then
+        -- Active State
+        TweenService:Create(toggleBtn, tweenInfo, {BackgroundColor3 = Color3.fromRGB(100, 220, 140)}):Play()
+        TweenService:Create(toggleStroke, tweenInfo, {Color = Color3.fromRGB(80, 200, 120)}):Play()
+        TweenService:Create(toggleText, tweenInfo, {TextColor3 = Color3.fromRGB(255, 255, 255)}):Play()
+        TweenService:Create(toggleIcon, tweenInfo, {TextColor3 = Color3.fromRGB(255, 255, 255)}):Play()
+        TweenService:Create(statusIndicator, tweenInfo, {BackgroundColor3 = Color3.fromRGB(80, 255, 120)}):Play()
+        
+        toggleText.Text = "✓ INSTA STEAL ACTIVE"
+        toggleIcon.Text = "●"
+        
+        -- Success ripple effect
+        local ripple = Instance.new("Frame")
+        ripple.Size = UDim2.new(0, 0, 0, 0)
+        ripple.Position = UDim2.new(0.5, 0, 0.5, 0)
+        ripple.AnchorPoint = Vector2.new(0.5, 0.5)
+        ripple.BackgroundColor3 = Color3.fromRGB(100, 255, 140)
+        ripple.BackgroundTransparency = 0.3
+        ripple.BorderSizePixel = 0
+        ripple.ZIndex = 3
+        ripple.Parent = toggleBtn
+        
+        local rippleCorner = Instance.new("UICorner")
+        rippleCorner.CornerRadius = UDim.new(1, 0)
+        rippleCorner.Parent = ripple
+        
+        TweenService:Create(ripple, TweenInfo.new(0.6, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+            Size = UDim2.new(2, 0, 2, 0),
+            BackgroundTransparency = 1
+        }):Play()
+        
+        task.delay(0.6, function() ripple:Destroy() end)
+    else
+        -- Inactive State
+        TweenService:Create(toggleBtn, tweenInfo, {BackgroundColor3 = Color3.fromRGB(250, 252, 255)}):Play()
+        TweenService:Create(toggleStroke, tweenInfo, {Color = Color3.fromRGB(220, 225, 235)}):Play()
+        TweenService:Create(toggleText, tweenInfo, {TextColor3 = Color3.fromRGB(80, 80, 80)}):Play()
+        TweenService:Create(toggleIcon, tweenInfo, {TextColor3 = Color3.fromRGB(200, 200, 200)}):Play()
+        TweenService:Create(statusIndicator, tweenInfo, {BackgroundColor3 = Color3.fromRGB(200, 200, 200)}):Play()
+        
+        toggleText.Text = "ACTIVATE INSTA STEAL"
+        toggleIcon.Text = "○"
+    end
+end)
+
+-- Radius Control Section
+local radiusSection = Instance.new("Frame")
+radiusSection.Size = UDim2.new(1, -40, 0, 90)
+radiusSection.Position = UDim2.new(0, 20, 0, 210)
+radiusSection.BackgroundTransparency = 1
+radiusSection.ZIndex = 3
+radiusSection.Parent = mainFrame
+
+local radiusLabel = Instance.new("TextLabel")
+radiusLabel.Size = UDim2.new(1, 0, 0, 25)
+radiusLabel.BackgroundTransparency = 1
+radiusLabel.Text = "STEAL RADIUS"
+radiusLabel.Font = Enum.Font.GothamBold
+radiusLabel.TextSize = 14
+radiusLabel.TextColor3 = Color3.fromRGB(70, 70, 70)
+radiusLabel.TextXAlignment = Enum.TextXAlignment.Left
+radiusLabel.ZIndex = 3
+radiusLabel.Parent = radiusSection
+
+-- Radius Display Card
+local radiusCard = Instance.new("Frame")
+radiusCard.Size = UDim2.new(0, 100, 0, 50)
+radiusCard.Position = UDim2.new(0, 0, 0, 35)
+radiusCard.BackgroundColor3 = Color3.fromRGB(248, 250, 255)
+radiusCard.BorderSizePixel = 0
+radiusCard.ZIndex = 4
+radiusCard.Parent = radiusSection
+
+local radiusCardCorner = Instance.new("UICorner")
+radiusCardCorner.CornerRadius = UDim.new(0, 14)
+radiusCardCorner.Parent = radiusCard
+
+local radiusCardStroke = Instance.new("UIStroke")
+radiusCardStroke.Thickness = 1.5
+radiusCardStroke.Color = Color3.fromRGB(230, 235, 245)
+radiusCardStroke.Parent = radiusCard
+
+local radiusValue = Instance.new("TextButton")
+radiusValue.Size = UDim2.new(1, 0, 1, 0)
+radiusValue.BackgroundTransparency = 1
+radiusValue.Text = tostring(AUTO_STEAL_PROX_RADIUS)
+radiusValue.Font = Enum.Font.GothamBold
+radiusValue.TextSize = 24
+radiusValue.TextColor3 = Color3.fromRGB(40, 40, 40)
+radiusValue.ZIndex = 5
+radiusValue.Parent = radiusCard
+
+local radiusUnit = Instance.new("TextLabel")
+radiusUnit.Size = UDim2.new(0, 60, 0, 20)
+radiusUnit.Position = UDim2.new(0, 110, 0, 50)
+radiusUnit.BackgroundTransparency = 1
+radiusUnit.Text = "studs"
+radiusUnit.Font = Enum.Font.Gotham
+radiusUnit.TextSize = 12
+radiusUnit.TextColor3 = Color3.fromRGB(120, 120, 120)
+radiusUnit.TextXAlignment = Enum.TextXAlignment.Left
+radiusUnit.ZIndex = 3
+radiusUnit.Parent = radiusSection
+
+-- Radius Input Handler
+radiusValue.MouseButton1Click:Connect(function()
+    local textBox = Instance.new("TextBox")
+    textBox.Size = UDim2.new(1, 0, 1, 0)
+    textBox.BackgroundTransparency = 1
+    textBox.Text = tostring(AUTO_STEAL_PROX_RADIUS)
+    textBox.Font = Enum.Font.GothamBold
+    textBox.TextSize = 24
+    textBox.TextColor3 = Color3.fromRGB(40, 40, 40)
+    textBox.ClearTextOnFocus = false
+    textBox.ZIndex = 6
+    textBox.Parent = radiusCard
+    textBox:CaptureFocus()
+    
+    textBox.FocusLost:Connect(function(enterPressed)
+        if enterPressed then
+            local num = tonumber(textBox.Text)
+            if num and num >= 5 and num <= 200 then
+                AUTO_STEAL_PROX_RADIUS = math.floor(num)
+                CIRCLE_RADIUS = AUTO_STEAL_PROX_RADIUS
+                radiusValue.Text = tostring(AUTO_STEAL_PROX_RADIUS)
+                
+                -- Visual feedback
+                TweenService:Create(radiusCard, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+                    BackgroundColor3 = Color3.fromRGB(200, 255, 220)
+                }):Play()
+                task.wait(0.3)
+                TweenService:Create(radiusCard, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+                    BackgroundColor3 = Color3.fromRGB(248, 250, 255)
+                }):Play()
+            end
+        end
+        textBox:Destroy()
+    end)
+end)
+
+-- Stats Display
+local statsContainer = Instance.new("Frame")
+statsContainer.Size = UDim2.new(1, -40, 0, 60)
+statsContainer.Position = UDim2.new(0, 20, 0, 320)
+statsContainer.BackgroundTransparency = 1
+statsContainer.ZIndex = 3
+statsContainer.Parent = mainFrame
+
+-- Animals Nearby Stat
+local nearbyCard = Instance.new("Frame")
+nearbyCard.Size = UDim2.new(0.48, 0, 1, 0)
+nearbyCard.BackgroundColor3 = Color3.fromRGB(250, 252, 255)
+nearbyCard.BorderSizePixel = 0
+nearbyCard.ZIndex = 4
+nearbyCard.Parent = statsContainer
+
+local nearbyCorner = Instance.new("UICorner")
+nearbyCorner.CornerRadius = UDim.new(0, 12)
+nearbyCorner.Parent = nearbyCard
+
+local nearbyStroke = Instance.new("UIStroke")
+nearbyStroke.Thickness = 1
+nearbyStroke.Color = Color3.fromRGB(230, 235, 245)
+nearbyStroke.Parent = nearbyCard
+
+local nearbyLabel = Instance.new("TextLabel")
+nearbyLabel.Size = UDim2.new(1, -20, 0, 20)
+nearbyLabel.Position = UDim2.new(0, 10, 0, 8)
+nearbyLabel.BackgroundTransparency = 1
+nearbyLabel.Text = "Animals Nearby"
+nearbyLabel.Font = Enum.Font.Gotham
+nearbyLabel.TextSize = 11
+nearbyLabel.TextColor3 = Color3.fromRGB(120, 120, 120)
+nearbyLabel.TextXAlignment = Enum.TextXAlignment.Left
+nearbyLabel.ZIndex = 5
+nearbyLabel.Parent = nearbyCard
+
+local nearbyCount = Instance.new("TextLabel")
+nearbyCount.Size = UDim2.new(1, -20, 0, 25)
+nearbyCount.Position = UDim2.new(0, 10, 1, -33)
+nearbyCount.BackgroundTransparency = 1
+nearbyCount.Text = "0"
+nearbyCount.Font = Enum.Font.GothamBold
+nearbyCount.TextSize = 22
+nearbyCount.TextColor3 = Color3.fromRGB(40, 40, 40)
+nearbyCount.TextXAlignment = Enum.TextXAlignment.Left
+nearbyCount.ZIndex = 5
+nearbyCount.Parent = nearbyCard
+
+-- Total Steals Stat
+local stealsCard = Instance.new("Frame")
+stealsCard.Size = UDim2.new(0.48, 0, 1, 0)
+stealsCard.Position = UDim2.new(0.52, 0, 0, 0)
+stealsCard.BackgroundColor3 = Color3.fromRGB(250, 252, 255)
+stealsCard.BorderSizePixel = 0
+stealsCard.ZIndex = 4
+stealsCard.Parent = statsContainer
+
+local stealsCorner = Instance.new("UICorner")
+stealsCorner.CornerRadius = UDim.new(0, 12)
+stealsCorner.Parent = stealsCard
+
+local stealsStroke = Instance.new("UIStroke")
+stealsStroke.Thickness = 1
+stealsStroke.Color = Color3.fromRGB(230, 235, 245)
+stealsStroke.Parent = stealsCard
+
+local stealsLabel = Instance.new("TextLabel")
+stealsLabel.Size = UDim2.new(1, -20, 0, 20)
+stealsLabel.Position = UDim2.new(0, 10, 0, 8)
+stealsLabel.BackgroundTransparency = 1
+stealsLabel.Text = "Total Steals"
+stealsLabel.Font = Enum.Font.Gotham
+stealsLabel.TextSize = 11
+stealsLabel.TextColor3 = Color3.fromRGB(120, 120, 120)
+stealsLabel.TextXAlignment = Enum.TextXAlignment.Left
+stealsLabel.ZIndex = 5
+stealsLabel.Parent = stealsCard
+
+local stealsCount = Instance.new("TextLabel")
+stealsCount.Size = UDim2.new(1, -20, 0, 25)
+stealsCount.Position = UDim2.new(0, 10, 1, -33)
+stealsCount.BackgroundTransparency = 1
+stealsCount.Text = "0"
+stealsCount.Font = Enum.Font.GothamBold
+stealsCount.TextSize = 22
+stealsCount.TextColor3 = Color3.fromRGB(40, 40, 40)
+stealsCount.TextXAlignment = Enum.TextXAlignment.Left
+stealsCount.ZIndex = 5
+stealsCount.Parent = stealsCard
+
+-- Update stats
+local totalSteals = 0
+task.spawn(function()
+    while true do
+        local hrp = getHRP()
+        if hrp then
+            local nearby = 0
+            for _, animal in ipairs(allAnimalsCache) do
+                if (hrp.Position - animal.worldPosition).Magnitude <= AUTO_STEAL_PROX_RADIUS then
+                    nearby = nearby + 1
+                end
+            end
+            nearbyCount.Text = tostring(nearby)
+        end
+        task.wait(0.5)
+    end
+end)
+
+-- Progress Bar Section
+local progressSection = Instance.new("Frame")
+progressSection.Size = UDim2.new(1, -40, 0, 85)
+progressSection.Position = UDim2.new(0, 20, 0, 395)
+progressSection.BackgroundTransparency = 1
+progressSection.ZIndex = 3
+progressSection.Parent = mainFrame
+
+local progressLabel = Instance.new("TextLabel")
+progressLabel.Size = UDim2.new(1, 0, 0, 20)
+progressLabel.BackgroundTransparency = 1
+progressLabel.Text = "STEAL PROGRESS"
+progressLabel.Font = Enum.Font.GothamBold
+progressLabel.TextSize = 14
+progressLabel.TextColor3 = Color3.fromRGB(70, 70, 70)
+progressLabel.TextXAlignment = Enum.TextXAlignment.Left
+progressLabel.ZIndex = 3
+progressLabel.Parent = progressSection
+
+-- Progress Bar Background
+local progressBg = Instance.new("Frame")
+progressBg.Size = UDim2.new(1, 0, 0, 16)
+progressBg.Position = UDim2.new(0, 0, 0, 30)
+progressBg.BackgroundColor3 = Color3.fromRGB(240, 242, 248)
+progressBg.BorderSizePixel = 0
+progressBg.ZIndex = 4
+progressBg.Parent = progressSection
+
+local progressBgCorner = Instance.new("UICorner")
+progressBgCorner.CornerRadius = UDim.new(0, 10)
+progressBgCorner.Parent = progressBg
+
+local progressBgStroke = Instance.new("UIStroke")
+progressBgStroke.Thickness = 1
+progressBgStroke.Color = Color3.fromRGB(230, 235, 245)
+progressBgStroke.Parent = progressBg
+
+-- Progress Bar Fill
+local progressFill = Instance.new("Frame")
+progressFill.Size = UDim2.new(0, 0, 1, 0)
+progressFill.BackgroundColor3 = Color3.fromRGB(100, 200, 255)
+progressFill.BorderSizePixel = 0
+progressFill.ZIndex = 5
+progressFill.Parent = progressBg
+
+local progressFillCorner = Instance.new("UICorner")
+progressFillCorner.CornerRadius = UDim.new(0, 10)
+progressFillCorner.Parent = progressFill
+
+local progressFillGradient = Instance.new("UIGradient")
+progressFillGradient.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(120, 220, 255)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(80, 180, 255))
+})
+progressFillGradient.Rotation = 90
+progressFillGradient.Parent = progressFill
+
+-- Progress shimmer effect
+local progressShimmer = Instance.new("Frame")
+progressShimmer.Size = UDim2.new(0.3, 0, 1, 0)
+progressShimmer.Position = UDim2.new(-0.3, 0, 0, 0)
+progressShimmer.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+progressShimmer.BackgroundTransparency = 0.7
+progressShimmer.BorderSizePixel = 0
+progressShimmer.ZIndex = 6
+progressShimmer.Parent = progressFill
+
+local shimmerGrad = Instance.new("UIGradient")
+shimmerGrad.Transparency = NumberSequence.new({
+    NumberSequenceKeypoint.new(0, 1),
+    NumberSequenceKeypoint.new(0.5, 0),
+    NumberSequenceKeypoint.new(1, 1)
+})
+shimmerGrad.Parent = progressShimmer
+
+-- Status Text
+local statusText = Instance.new("TextLabel")
+statusText.Size = UDim2.new(1, 0, 0, 25)
+statusText.Position = UDim2.new(0, 0, 0, 55)
+statusText.BackgroundTransparency = 1
+statusText.Text = "Ready to steal..."
+statusText.Font = Enum.Font.Gotham
+statusText.TextSize = 13
+statusText.TextColor3 = Color3.fromRGB(120, 120, 120)
+statusText.TextXAlignment = Enum.TextXAlignment.Left
+statusText.ZIndex = 3
+statusText.Parent = progressSection
+
+-- Progress Animation System
+task.spawn(function()
+    while true do
+        if IsStealing then
+            local targetSize = UDim2.new(StealProgress, 0, 1, 0)
+            TweenService:Create(progressFill, TweenInfo.new(0.1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+                Size = targetSize
+            }):Play()
+            
+            statusText.Text = string.format("Stealing %s... %d%%", CurrentStealTarget or "animal", math.floor(StealProgress * 100))
+            statusText.TextColor3 = Color3.fromRGB(80, 180, 255)
+            
+            -- Shimmer animation
+            if StealProgress > 0.05 then
+                TweenService:Create(progressShimmer, TweenInfo.new(0.8, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, -1), {
+                    Position = UDim2.new(1, 0, 0, 0)
+                }):Play()
+            end
+        else
+            if progressFill.Size.X.Scale > 0 then
+                TweenService:Create(progressFill, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+                    Size = UDim2.new(0, 0, 1, 0)
+                }):Play()
+            end
+            
+            if CONFIG.AUTO_STEAL_NEAREST then
+                statusText.Text = "✓ Active - Walk near animals"
+                statusText.TextColor3 = Color3.fromRGB(80, 200, 120)
+            else
+                statusText.Text = "Ready to steal..."
+                statusText.TextColor3 = Color3.fromRGB(120, 120, 120)
+            end
+        end
+        task.wait(0.03)
+    end
+end)
+
+-- "Made by DQ" Credit
+local creditLabel = Instance.new("TextLabel")
+creditLabel.Size = UDim2.new(0, 150, 0, 20)
+creditLabel.Position = UDim2.new(1, -160, 1, -30)
+creditLabel.BackgroundTransparency = 1
+creditLabel.Text = "made by DQ"
+creditLabel.Font = Enum.Font.GothamBold
+creditLabel.TextSize = 12
+creditLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
+creditLabel.TextXAlignment = Enum.TextXAlignment.Right
+creditLabel.ZIndex = 3
+creditLabel.Parent = mainFrame
+
+-- Credit shimmer effect
+local creditShimmer = Instance.new("UIGradient")
+creditShimmer.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0.0, Color3.fromRGB(120, 120, 120)),
+    ColorSequenceKeypoint.new(0.4, Color3.fromRGB(120, 120, 120)),
+    ColorSequenceKeypoint.new(0.5, Color3.fromRGB(200, 200, 200)),
+    ColorSequenceKeypoint.new(0.6, Color3.fromRGB(120, 120, 120)),
+    ColorSequenceKeypoint.new(1.0, Color3.fromRGB(120, 120, 120))
+})
+creditShimmer.Offset = Vector2.new(-1, 0)
+creditShimmer.Parent = creditLabel
+
+task.spawn(function()
+    while true do
+        TweenService:Create(creditShimmer, TweenInfo.new(4, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, -1), {
+            Offset = Vector2.new(1, 0)
+        }):Play()
+        task.wait(4)
+    end
+end)
+
+-- Draggable GUI
+local dragging, dragInput, dragStart, startPos
+
+local function update(input)
+    local delta = input.Position - dragStart
+    mainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+end
+
+mainFrame.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPos = mainFrame.Position
+        
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                dragging = false
+            end
+        end)
+    end
+end)
+
+mainFrame.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+        dragInput = input
+    end
+end)
+
+game:GetService("UserInputService").InputChanged:Connect(function(input)
+    if input == dragInput and dragging then
+        update(input)
+    end
+end)
+
+-- Track successful steals
+local originalExecute = executeInternalStealAsync
+executeInternalStealAsync = function(...)
+    local result = originalExecute(...)
+    if result then
+        totalSteals = totalSteals + 1
+        stealsCount.Text = tostring(totalSteals)
+        
+        -- Success flash
+        TweenService:Create(stealsCard, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(200, 255, 220)}):Play()
+        task.wait(0.3)
+        TweenService:Create(stealsCard, TweenInfo.new(0.3), {BackgroundColor3 = Color3.fromRGB(250, 252, 255)}):Play()
+    end
+    return result
+end
+
+-- ============================================
+-- INITIALIZE SYSTEM
+-- ============================================
+
+initializeScanner()
+autoStealLoop()
+
+-- Circle visualization
+if LocalPlayer.Character then
+    local hrp = getHRP()
+    if hrp then
+        for i = 1, PartsCount do
+            local angle = (i / PartsCount) * 2 * math.pi
+            local x = math.cos(angle) * CIRCLE_RADIUS
+            local z = math.sin(angle) * CIRCLE_RADIUS
+            
+            local part = Instance.new("Part")
+            part.Size = Vector3.new(PART_THICKNESS, PART_HEIGHT, PART_THICKNESS)
+            part.Position = hrp.Position + Vector3.new(x, -2.5, z)
+            part.Anchored = true
+            part.CanCollide = false
+            part.Color = PART_COLOR
+            part.Material = Enum.Material.Neon
+            part.Transparency = 0.7
+            part.Parent = workspace
+            
+            table.insert(circleParts, part)
+        end
+        
+        RunService.Heartbeat:Connect(function()
+            if not circleEnabled then return end
+            local currentHRP = getHRP()
+            if not currentHRP then return end
+            
+            for i, part in ipairs(circleParts) do
+                local angle = (i / PartsCount) * 2 * math.pi
+                local x = math.cos(angle) * CIRCLE_RADIUS
+                local z = math.sin(angle) * CIRCLE_RADIUS
+                part.Position = currentHRP.Position + Vector3.new(x, -2.5, z)
+            end
+        end)
+    end
+end
+
+LocalPlayer.CharacterAdded:Connect(function(character)
+    task.wait(1)
+    local hrp = getHRP()
+    if hrp then
+        for _, part in ipairs(circleParts) do
+            part:Destroy()
+        end
+        circleParts = {}
+        
+        for i = 1, PartsCount do
+            local angle = (i / PartsCount) * 2 * math.pi
+            local x = math.cos(angle) * CIRCLE_RADIUS
+            local z = math.sin(angle) * CIRCLE_RADIUS
+            
+            local part = Instance.new("Part")
+            part.Size = Vector3.new(PART_THICKNESS, PART_HEIGHT, PART_THICKNESS)
+            part.Position = hrp.Position + Vector3.new(x, -2.5, z)
+            part.Anchored = true
+            part.CanCollide = false
+            part.Color = PART_COLOR
+            part.Material = Enum.Material.Neon
+            part.Transparency = 0.7
+            part.Parent = workspace
+            
+            table.insert(circleParts, part)
+        end
+    end
+end)
+
+print("✨ Pub Shi Insta Steal by DQ loaded successfully! ✨")
+print("💎 Features: Animated gradients, glassmorphism, live stats")
+print("🎯 Toggle ON and walk near animals to instantly steal them!")
