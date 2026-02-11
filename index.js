@@ -1,459 +1,639 @@
-const express = require('express');
-const app = express();
-const port = process.env.PORT || 3000;
+const { Client, GatewayIntentBits, EmbedBuilder, AttachmentBuilder } = require(‘discord.js’);
+const axios = require(‘axios’);
 
-let currentJobId = null;
-let exemptList = new Set(); // Whitelisted users
-let activePlayers = new Map(); // Currently in server
-let waitlist = new Map(); // Discord ID -> {username, position, brainrotPaid, steals, addedAt}
+const client = new Client({
+intents: [
+GatewayIntentBits.Guilds,
+GatewayIntentBits.GuildMessages,
+GatewayIntentBits.MessageContent,
+GatewayIntentBits.GuildMembers
+]
+});
 
-app.use(express.json());
+const RAILWAY_URL = process.env.RAILWAY_URL || ‘https://pub-shi-production.up.railway.app’;
+const API_KEY = process.env.API_KEY;
+const OWNER_IDS = process.env.OWNER_IDS ? process.env.OWNER_IDS.split(’,’) : [];
+const BUYER_ROLE_ID = process.env.BUYER_ROLE_ID || ‘’; // Role to remove when steals reach 0
 
-// Middleware for API key validation
-const requireApiKey = (req, res, next) => {
-    const apiKey = req.body.apiKey || req.query.apiKey || req.headers['x-api-key'];
+// Helper function to handle API errors
+const handleApiError = (error, defaultMessage = ‘An error occurred’) => {
+if (error.response) {
+// Server responded with error status
+const status = error.response.status;
+const message = error.response.data?.error || error.response.data?.message || defaultMessage;
+
+```
+    if (status === 404) return `❌ Not found: ${message}`;
+    if (status === 403) return `❌ Access denied: ${message}`;
+    if (status === 400) return `❌ Invalid request: ${message}`;
+    if (status === 409) return `❌ ${message}`;
     
-    if (!process.env.API_KEY) {
-        console.warn('⚠️ API_KEY not set in environment variables!');
-        return next();
-    }
-    
-    if (apiKey !== process.env.API_KEY) {
-        return res.status(403).json({ error: 'Invalid or missing API key' });
-    }
-    
-    next();
+    return `❌ Error (${status}): ${message}`;
+} else if (error.request) {
+    // Request made but no response
+    return `❌ Cannot connect to server. Please try again later.`;
+} else {
+    // Something else happened
+    return `❌ ${error.message || defaultMessage}`;
+}
+```
+
 };
 
-// Root endpoint
-app.get('/', (req, res) => {
-    res.send(`
-        <h1>🎮 SAB Waitlist System</h1>
-        <p>📋 Current JobId: ${currentJobId || 'Not set'}</p>
-        <p>👥 Active Players: ${activePlayers.size}</p>
-        <p>✅ Exempt Users: ${exemptList.size}</p>
-        <p>⏳ Waitlist: ${waitlist.size} users</p>
-        <hr>
-        <h2>📡 API Status</h2>
-        <p>✅ Server is running</p>
-        <p>🔑 API Key: ${process.env.API_KEY ? 'Configured' : '❌ Not Set'}</p>
-    `);
+// Check for required environment variables
+if (!process.env.DISCORD_BOT_TOKEN) {
+console.error(‘❌ DISCORD_BOT_TOKEN is not set!’);
+process.exit(1);
+}
+
+if (!API_KEY) {
+console.warn(‘⚠️ API_KEY is not set! Some commands may not work.’);
+}
+
+if (OWNER_IDS.length === 0) {
+console.warn(‘⚠️ OWNER_IDS is not set! Owner commands will not work for anyone.’);
+}
+
+if (!BUYER_ROLE_ID) {
+console.warn(‘⚠️ BUYER_ROLE_ID is not set! Role management will not work.’);
+}
+
+client.on(‘ready’, () => {
+console.log(`✅ SAB Bot logged in as ${client.user.tag}`);
+console.log(`📋 Config Check:`);
+console.log(`   - Railway URL: ${RAILWAY_URL}`);
+console.log(`   - API Key: ${API_KEY ? 'Set ✓' : 'Not Set ✗'}`);
+console.log(`   - Owner IDs: ${OWNER_IDS.length > 0 ? OWNER_IDS.join(', ') : 'None ✗'}`);
+console.log(`   - Buyer Role ID: ${BUYER_ROLE_ID || 'Not Set ✗'}`);
+client.user.setActivity(‘SAB Waitlist System’, { type: ‘WATCHING’ });
 });
 
-// Health check endpoint
-app.get('/health', (req, res) => {
-    res.json({ 
-        status: 'ok', 
-        uptime: process.uptime(),
-        jobId: currentJobId,
-        playerCount: activePlayers.size,
-        waitlistCount: waitlist.size
-    });
-});
+client.on(‘messageCreate’, async (message) => {
+if (message.author.bot) return;
+if (!message.guild) return; // Ignore DMs
+if (!message.content.startsWith(’!’)) return; // Ignore non-commands early
+
+```
+const isOwner = OWNER_IDS.includes(message.author.id);
+const hasBuyerRole = BUYER_ROLE_ID && message.member
+    ? message.member.roles.cache.has(BUYER_ROLE_ID)
+    : false;
+
+const args = message.content.trim().split(/\s+/);
+const command = args[0].toLowerCase();
 
 // ========================================================
-// JOBID MANAGEMENT
+// !SLOTS - Show all active players (BUYER ROLE REQUIRED)
 // ========================================================
 
-app.post('/update', (req, res) => {
-    const { jobId, username } = req.body;
-    
-    if (!jobId) {
-        return res.status(400).json({ error: 'JobId is required' });
+if (command === '!slots') {
+    if (!hasBuyerRole && !isOwner) {
+        return message.reply('❌ You need the Buyer role to use this command!');
     }
     
-    currentJobId = jobId;
-    console.log(`✅ JobId updated: ${currentJobId}${username ? ` by ${username}` : ''}`);
-    res.json({ success: true, jobId: currentJobId });
-});
-
-app.get('/getjobid', (req, res) => {
-    if (currentJobId) {
-        res.json({ jobId: currentJobId });
-    } else {
-        res.status(404).json({ error: 'No JobId available' });
-    }
-});
-
-// ========================================================
-// PLAYER SESSION MANAGEMENT
-// ========================================================
-
-app.post('/player/join', (req, res) => {
-    const { username, displayName, userId, device, avatar } = req.body;
-    
-    if (!username) {
-        return res.status(400).json({ error: 'Username is required' });
-    }
-    
-    const avatarUrl = avatar || (userId ? 
-        `https://www.roblox.com/headshot-thumbnail/image?userId=${userId}&width=420&height=420&format=png` : 
-        'https://www.roblox.com/headshot-thumbnail/image?userId=1&width=420&height=420&format=png'
-    );
-    
-    activePlayers.set(username, {
-        username,
-        displayName: displayName || username,
-        userId: userId || 0,
-        device: device || 'Unknown',
-        avatar: avatarUrl,
-        joinedAt: Date.now()
-    });
-    
-    console.log(`✅ Player joined: ${username} (${displayName || username}) on ${device || 'Unknown'}`);
-    res.json({ success: true, player: activePlayers.get(username) });
-});
-
-app.post('/player/leave', (req, res) => {
-    const { username } = req.body;
-    
-    if (!username) {
-        return res.status(400).json({ error: 'Username is required' });
-    }
-    
-    const existed = activePlayers.has(username);
-    activePlayers.delete(username);
-    
-    if (existed) {
-        console.log(`🚪 Player left: ${username}`);
-    }
-    
-    res.json({ success: true, existed });
-});
-
-app.get('/players/list', (req, res) => {
-    const players = Array.from(activePlayers.values()).sort((a, b) => a.joinedAt - b.joinedAt);
-    res.json({ 
-        players,
-        count: players.length,
-        jobId: currentJobId
-    });
-});
-
-app.get('/players/count', (req, res) => {
-    res.json({ 
-        count: activePlayers.size,
-        jobId: currentJobId
-    });
-});
-
-// ========================================================
-// EXEMPT LIST (WHITELIST)
-// ========================================================
-
-app.post('/exempt/add', requireApiKey, (req, res) => {
-    const { username } = req.body;
-    
-    if (!username) {
-        return res.status(400).json({ error: 'Username is required' });
-    }
-    
-    const normalizedUsername = username.toLowerCase().trim();
-    exemptList.add(normalizedUsername);
-    console.log(`✅ Added to exempt list: ${username}`);
-    res.json({ success: true, username: normalizedUsername });
-});
-
-app.post('/exempt/remove', requireApiKey, (req, res) => {
-    const { username } = req.body;
-    
-    if (!username) {
-        return res.status(400).json({ error: 'Username is required' });
-    }
-    
-    const normalizedUsername = username.toLowerCase().trim();
-    const existed = exemptList.has(normalizedUsername);
-    exemptList.delete(normalizedUsername);
-    
-    console.log(`${existed ? '🗑️' : '⚠️'} ${existed ? 'Removed' : 'Attempted to remove'} from exempt list: ${username}`);
-    res.json({ success: true, username: normalizedUsername, existed });
-});
-
-app.get('/exempt/check/:username', (req, res) => {
-    const username = req.params.username.toLowerCase().trim();
-    const exempt = exemptList.has(username);
-    res.json({ exempt, username });
-});
-
-app.get('/exempt/list', (req, res) => {
-    const users = Array.from(exemptList).sort();
-    res.json({ users, count: users.length });
-});
-
-// ========================================================
-// WHITELIST CHECK (for Roblox game)
-// ========================================================
-
-app.get('/checkwhitelist', (req, res) => {
-    const username = req.query.username;
-    
-    if (!username) {
-        return res.status(400).json({ error: 'Username required' });
-    }
-    
-    const normalizedUsername = username.toLowerCase().trim();
-    const isWhitelisted = exemptList.has(normalizedUsername);
-    
-    console.log(`🔍 Whitelist check for ${username}: ${isWhitelisted}`);
-    
-    res.json({ 
-        isWhitelisted,
-        username: normalizedUsername
-    });
-});
-
-// ========================================================
-// WAITLIST MANAGEMENT
-// ========================================================
-
-app.post('/waitlist/add', requireApiKey, (req, res) => {
-    const { discordId, discordUsername, brainrotPaid, steals } = req.body;
-    
-    if (!discordId || !discordUsername) {
-        return res.status(400).json({ error: 'discordId and discordUsername are required' });
-    }
-    
-    // Check if user already exists
-    if (waitlist.has(discordId)) {
-        return res.status(409).json({ 
-            error: 'User already in waitlist',
-            user: waitlist.get(discordId)
-        });
-    }
-    
-    // Calculate position (last position + 1)
-    let maxPosition = 0;
-    waitlist.forEach(user => {
-        if (user.position > maxPosition) maxPosition = user.position;
-    });
-    
-    const newUser = {
-        discordId,
-        discordUsername,
-        position: maxPosition + 1,
-        brainrotPaid: brainrotPaid || 0,
-        steals: steals || 0,
-        addedAt: Date.now()
-    };
-    
-    waitlist.set(discordId, newUser);
-    
-    console.log(`✅ Added to waitlist: ${discordUsername} (Position: ${maxPosition + 1}, Steals: ${steals || 0})`);
-    res.json({ 
-        success: true, 
-        position: maxPosition + 1,
-        user: newUser
-    });
-});
-
-app.post('/waitlist/remove', requireApiKey, (req, res) => {
-    const { discordId } = req.body;
-    
-    if (!discordId) {
-        return res.status(400).json({ error: 'discordId is required' });
-    }
-    
-    const user = waitlist.get(discordId);
-    if (user) {
-        waitlist.delete(discordId);
-        console.log(`🗑️ Removed from waitlist: ${user.discordUsername}`);
-        res.json({ success: true, user });
-    } else {
-        res.status(404).json({ error: 'User not in waitlist' });
-    }
-});
-
-app.post('/waitlist/addsteals', requireApiKey, (req, res) => {
-    const { discordId, amount } = req.body;
-    
-    if (!discordId) {
-        return res.status(400).json({ error: 'discordId is required' });
-    }
-    
-    if (!amount || amount <= 0) {
-        return res.status(400).json({ error: 'amount must be a positive number' });
-    }
-    
-    const user = waitlist.get(discordId);
-    if (user) {
-        user.steals = (user.steals || 0) + amount;
-        waitlist.set(discordId, user); // Update the map
-        console.log(`✅ Added ${amount} steals to ${user.discordUsername} (Total: ${user.steals})`);
-        res.json({ success: true, user });
-    } else {
-        res.status(404).json({ error: 'User not in waitlist' });
-    }
-});
-
-app.post('/waitlist/usesteals', (req, res) => {
-    const { discordId, amount } = req.body;
-    
-    if (!discordId) {
-        return res.status(400).json({ error: 'discordId is required' });
-    }
-    
-    const stealAmount = amount || 1;
-    
-    const user = waitlist.get(discordId);
-    if (user) {
-        const previousSteals = user.steals || 0;
-        user.steals = Math.max(0, previousSteals - stealAmount);
+    try {
+        const response = await axios.get(`${RAILWAY_URL}/players/list`);
+        const { players, count, jobId } = response.data;
         
-        // If steals reach 0, remove from waitlist
-        if (user.steals === 0) {
-            waitlist.delete(discordId);
-            console.log(`🗑️ User ran out of steals, removed: ${user.discordUsername}`);
-            res.json({ success: true, removed: true, user });
+        if (count === 0) {
+            return message.reply('📊 No players currently in the server');
+        }
+        
+        const embed = new EmbedBuilder()
+            .setTitle('👥 Active Players in SAB Server')
+            .setColor(0x00ffff)
+            .setFooter({ text: `${count} player(s) online` })
+            .setTimestamp();
+        
+        let description = `**JobId:** \`${jobId || 'Not set'}\`\n\n`;
+        
+        const displayCount = Math.min(players.length, 10);
+        for (let i = 0; i < displayCount; i++) {
+            const p = players[i];
+            description += `**${i + 1}. ${p.displayName}** (@${p.username})\n`;
+            description += `   📱 Device: ${p.device}\n`;
+            description += `   🆔 UserId: \`${p.userId}\`\n`;
+            if (p.avatar) {
+                description += `   🖼️ [Avatar](${p.avatar})\n`;
+            }
+            description += '\n';
+        }
+        
+        if (players.length > 10) {
+            description += `\n*...and ${players.length - 10} more players*`;
+        }
+        
+        embed.setDescription(description);
+        
+        if (players.length > 0 && players[0].avatar) {
+            embed.setThumbnail(players[0].avatar);
+        }
+        
+        message.reply({ embeds: [embed] });
+    } catch (error) {
+        console.error('Error fetching player list:', error);
+        message.reply(handleApiError(error, 'Failed to fetch player list'));
+    }
+}
+
+// ========================================================
+// !WHITELIST - Add user to exempt list (OWNER ONLY)
+// ========================================================
+
+else if (command === '!whitelist') {
+    if (!isOwner) {
+        return message.reply('❌ This command is owner-only!');
+    }
+    
+    const username = args[1];
+    
+    if (!username) {
+        return message.reply('**Usage:** `!whitelist <roblox_username>`\n**Example:** `!whitelist JohnDoe123`');
+    }
+    
+    try {
+        const response = await axios.post(`${RAILWAY_URL}/exempt/add`, {
+            username,
+            apiKey: API_KEY
+        });
+        
+        const embed = new EmbedBuilder()
+            .setTitle('✅ User Whitelisted')
+            .setColor(0x00ff00)
+            .addFields({ name: 'Roblox Username', value: `\`${response.data.username}\`` })
+            .setFooter({ text: 'This user will not be kicked from the server' })
+            .setTimestamp();
+        
+        message.reply({ embeds: [embed] });
+    } catch (error) {
+        console.error('Error whitelisting user:', error);
+        message.reply(handleApiError(error, 'Failed to whitelist user'));
+    }
+}
+
+// ========================================================
+// !UNWHITELIST - Remove from exempt list (OWNER ONLY)
+// ========================================================
+
+else if (command === '!unwhitelist') {
+    if (!isOwner) {
+        return message.reply('❌ This command is owner-only!');
+    }
+    
+    const username = args[1];
+    
+    if (!username) {
+        return message.reply('**Usage:** `!unwhitelist <roblox_username>`\n**Example:** `!unwhitelist JohnDoe123`');
+    }
+    
+    try {
+        const response = await axios.post(`${RAILWAY_URL}/exempt/remove`, {
+            username,
+            apiKey: API_KEY
+        });
+        
+        const embed = new EmbedBuilder()
+            .setTitle('✅ User Removed from Whitelist')
+            .setColor(0xff9900)
+            .addFields({ name: 'Roblox Username', value: `\`${response.data.username}\`` })
+            .setFooter({ text: response.data.existed ? 'User was in whitelist' : 'User was not in whitelist' })
+            .setTimestamp();
+        
+        message.reply({ embeds: [embed] });
+    } catch (error) {
+        console.error('Error removing from whitelist:', error);
+        message.reply(handleApiError(error, 'Failed to remove from whitelist'));
+    }
+}
+
+// ========================================================
+// !JOINSERVER - Get clickable join link (BUYER ROLE REQUIRED)
+// ========================================================
+
+else if (command === '!joinserver') {
+    if (!hasBuyerRole && !isOwner) {
+        return message.reply('❌ You need the Buyer role to use this command!');
+    }
+    
+    try {
+        const response = await axios.get(`${RAILWAY_URL}/getjobid`);
+        const jobId = response.data.jobId;
+        
+        if (!jobId) {
+            return message.reply('❌ No active server JobId set!');
+        }
+        
+        const placeId = 109983668079237; // SAB Place ID
+        const joinLink = `https://www.roblox.com/games/start?placeId=${placeId}&launchData=${encodeURIComponent(jobId)}`;
+        
+        const embed = new EmbedBuilder()
+            .setTitle('🎮 Join SAB Server')
+            .setColor(0x00bfff)
+            .setDescription(`[**Click here to join the server**](${joinLink})`)
+            .addFields(
+                { name: 'JobId', value: `\`${jobId}\`` },
+                { name: 'Place ID', value: `\`${placeId}\`` }
+            )
+            .setFooter({ text: 'Link expires when server restarts' })
+            .setTimestamp();
+        
+        message.reply({ embeds: [embed] });
+    } catch (error) {
+        console.error('Error getting join link:', error);
+        if (error.response && error.response.status === 404) {
+            message.reply('❌ No active server JobId set! Please wait for the server to start.');
         } else {
-            waitlist.set(discordId, user); // Update the map
-            console.log(`📉 Used ${stealAmount} steals for ${user.discordUsername} (${previousSteals} -> ${user.steals})`);
-            res.json({ success: true, removed: false, user });
+            message.reply(handleApiError(error, 'Failed to get join link'));
         }
-    } else {
-        res.status(404).json({ error: 'User not in waitlist' });
     }
-});
+}
 
-app.post('/waitlist/updateposition', requireApiKey, (req, res) => {
-    const { discordId, newPosition } = req.body;
-    
-    if (!discordId) {
-        return res.status(400).json({ error: 'discordId is required' });
-    }
-    
-    if (!newPosition || newPosition < 0) {
-        return res.status(400).json({ error: 'newPosition must be a positive number' });
-    }
-    
-    const user = waitlist.get(discordId);
-    if (user) {
-        const oldPosition = user.position;
-        user.position = newPosition;
-        waitlist.set(discordId, user);
-        console.log(`📊 Updated position for ${user.discordUsername}: ${oldPosition} -> ${newPosition}`);
-        res.json({ success: true, user, oldPosition });
-    } else {
-        res.status(404).json({ error: 'User not in waitlist' });
-    }
-});
+// ========================================================
+// !WAITLIST - Show current waitlist (BUYER ROLE REQUIRED)
+// ========================================================
 
-app.get('/waitlist/list', (req, res) => {
-    const users = Array.from(waitlist.values()).sort((a, b) => a.position - b.position);
-    
-    const activeUsers = users.filter(u => u.position > 1);
-    const waitingUsers = users.filter(u => u.position <= 1);
-    
-    res.json({ 
-        all: users,
-        active: activeUsers,
-        waiting: waitingUsers,
-        totalCount: users.length,
-        activeCount: activeUsers.length,
-        waitingCount: waitingUsers.length
-    });
-});
-
-app.get('/waitlist/get/:discordId', (req, res) => {
-    const { discordId } = req.params;
-    
-    if (!discordId) {
-        return res.status(400).json({ error: 'discordId is required' });
+else if (command === '!waitlist') {
+    if (!hasBuyerRole && !isOwner) {
+        return message.reply('❌ You need the Buyer role to use this command!');
     }
     
-    const user = waitlist.get(discordId);
-    if (user) {
-        res.json({ success: true, user });
-    } else {
-        res.status(404).json({ error: 'User not in waitlist' });
-    }
-});
-
-// Bulk position update endpoint
-app.post('/waitlist/reorder', requireApiKey, (req, res) => {
-    const { positions } = req.body; // Array of {discordId, position}
-    
-    if (!positions || !Array.isArray(positions)) {
-        return res.status(400).json({ error: 'positions array is required' });
-    }
-    
-    let updated = 0;
-    positions.forEach(({ discordId, position }) => {
-        const user = waitlist.get(discordId);
-        if (user && position >= 0) {
-            user.position = position;
-            waitlist.set(discordId, user);
-            updated++;
+    try {
+        const response = await axios.get(`${RAILWAY_URL}/waitlist/list`);
+        const { active, waiting, activeCount, waitingCount } = response.data;
+        
+        if (activeCount === 0 && waitingCount === 0) {
+            const embed = new EmbedBuilder()
+                .setTitle('⏳ SAB Waitlist Status')
+                .setDescription('📋 Waitlist is currently empty')
+                .setColor(0x808080)
+                .setTimestamp();
+            
+            return message.reply({ embeds: [embed] });
         }
-    });
-    
-    console.log(`📊 Bulk reorder: Updated ${updated} positions`);
-    res.json({ success: true, updated });
-});
-
-// ========================================================
-// ERROR HANDLING
-// ========================================================
-
-// 404 handler
-app.use((req, res) => {
-    res.status(404).json({ 
-        error: 'Endpoint not found',
-        path: req.path,
-        method: req.method
-    });
-});
-
-// Global error handler
-app.use((err, req, res, next) => {
-    console.error('❌ Error:', err);
-    res.status(500).json({ 
-        error: 'Internal server error',
-        message: err.message
-    });
-});
-
-// ========================================================
-// CLEANUP & UTILITIES
-// ========================================================
-
-// Auto-cleanup stale player sessions every 5 minutes
-setInterval(() => {
-    const now = Date.now();
-    let removed = 0;
-    
-    activePlayers.forEach((player, username) => {
-        if (now - player.joinedAt > 600000) { // 10 minutes
-            activePlayers.delete(username);
-            removed++;
+        
+        const embed = new EmbedBuilder()
+            .setTitle('⏳ SAB Waitlist Status')
+            .setColor(0xffd700)
+            .setFooter({ text: `Active: ${activeCount} | Waiting: ${waitingCount} | Total: ${activeCount + waitingCount}` })
+            .setTimestamp();
+        
+        let description = '';
+        
+        if (activeCount > 0) {
+            description += '**🟢 Currently in Server (Position > 1):**\n';
+            active.slice(0, 15).forEach((user, i) => {
+                description += `${i + 1}. <@${user.discordId}> - Pos: \`${user.position}\` | Steals: \`${user.steals}\`\n`;
+            });
+            if (active.length > 15) {
+                description += `*...and ${active.length - 15} more*\n`;
+            }
         }
-    });
-    
-    if (removed > 0) {
-        console.log(`🧹 Cleaned up ${removed} stale player sessions`);
+        
+        if (waitingCount > 0) {
+            description += '\n**🔴 On Waitlist (Position ≤ 1):**\n';
+            waiting.slice(0, 15).forEach((user, i) => {
+                description += `${i + 1}. <@${user.discordId}> - Pos: \`${user.position}\` | Steals: \`${user.steals}\`\n`;
+            });
+            if (waiting.length > 15) {
+                description += `*...and ${waiting.length - 15} more*\n`;
+            }
+        }
+        
+        embed.setDescription(description || 'No users in waitlist');
+        
+        message.reply({ embeds: [embed] });
+    } catch (error) {
+        console.error('Error fetching waitlist:', error);
+        message.reply(handleApiError(error, 'Failed to fetch waitlist'));
     }
-}, 300000); // Every 5 minutes
+}
+
+// ========================================================
+// !STEALS - Show steals for specific user or all (BUYER ROLE REQUIRED)
+// ========================================================
+
+else if (command === '!steals') {
+    if (!hasBuyerRole && !isOwner) {
+        return message.reply('❌ You need the Buyer role to use this command!');
+    }
+    
+    const userId = args[1] ? args[1].replace(/[<@!>]/g, '') : message.author.id;
+    
+    try {
+        const response = await axios.get(`${RAILWAY_URL}/waitlist/get/${userId}`);
+        const user = response.data.user;
+        
+        const embed = new EmbedBuilder()
+            .setTitle('📊 Steals Information')
+            .setColor(user.steals > 0 ? 0x00ff00 : 0xff0000)
+            .addFields(
+                { name: 'User', value: `<@${user.discordId}>`, inline: true },
+                { name: 'Steals Remaining', value: `**${user.steals}**`, inline: true },
+                { name: 'Position', value: `\`${user.position}\``, inline: true },
+                { name: 'Brainrot Paid', value: `${user.brainrotPaid}`, inline: true },
+                { name: 'Status', value: user.position > 1 ? '🟢 In Server' : '🔴 On Waitlist', inline: true }
+            )
+            .setTimestamp();
+        
+        if (user.steals === 0) {
+            embed.setDescription('⚠️ **Out of steals!** User will be removed from waitlist on next use.');
+        } else if (user.steals <= 3) {
+            embed.setDescription(`⚠️ **Low steals warning!** Only ${user.steals} steal(s) remaining.`);
+        }
+        
+        message.reply({ embeds: [embed] });
+    } catch (error) {
+        console.error('Error fetching steals:', error);
+        if (error.response && error.response.status === 404) {
+            message.reply(`❌ <@${userId}> is not in the waitlist!`);
+        } else {
+            message.reply(handleApiError(error, 'Failed to fetch steals'));
+        }
+    }
+}
+
+// ========================================================
+// !ADDWAITLIST - Add user to waitlist (Owner only)
+// ========================================================
+
+else if (command === '!addwaitlist') {
+    if (!isOwner) {
+        return message.reply('❌ This command is owner-only!');
+    }
+    
+    const userMention = args[1];
+    const brainrotPaid = parseInt(args[2]);
+    const initialSteals = parseInt(args[3]) || 0;
+    
+    if (!userMention) {
+        return message.reply('**Usage:** `!addwaitlist <@user> <brainrot_paid> [initial_steals]`\n**Example:** `!addwaitlist @User 100 5`');
+    }
+    
+    if (isNaN(brainrotPaid) || brainrotPaid < 0) {
+        return message.reply('❌ Brainrot paid must be a positive number!');
+    }
+    
+    if (initialSteals < 0) {
+        return message.reply('❌ Initial steals must be a positive number!');
+    }
+    
+    const discordId = userMention.replace(/[<@!>]/g, '');
+    
+    try {
+        const member = await message.guild.members.fetch(discordId);
+        
+        const response = await axios.post(`${RAILWAY_URL}/waitlist/add`, {
+            discordId,
+            discordUsername: member.user.tag,
+            brainrotPaid,
+            steals: initialSteals,
+            apiKey: API_KEY
+        });
+        
+        // Add buyer role
+        if (BUYER_ROLE_ID) {
+            try {
+                await member.roles.add(BUYER_ROLE_ID);
+                console.log(`✅ Added buyer role to ${member.user.tag}`);
+            } catch (err) {
+                console.error('Failed to add buyer role:', err);
+            }
+        }
+        
+        const user = response.data.user;
+        const embed = new EmbedBuilder()
+            .setTitle('✅ Added to Waitlist')
+            .setColor(0x00ff00)
+            .addFields(
+                { name: 'User', value: `<@${discordId}>`, inline: true },
+                { name: 'Position', value: `\`${user.position}\``, inline: true },
+                { name: 'Brainrot Paid', value: `${brainrotPaid}`, inline: true },
+                { name: 'Initial Steals', value: `${initialSteals}`, inline: true }
+            )
+            .setFooter({ text: 'Buyer role has been added' })
+            .setTimestamp();
+        
+        message.reply({ embeds: [embed] });
+    } catch (error) {
+        console.error('Error adding to waitlist:', error);
+        
+        // If user already exists, suggest using addsteals instead
+        if (error.response && error.response.status === 409) {
+            message.reply('❌ This user is already in the waitlist! Use `!addsteals` to add more steals.');
+        } else {
+            message.reply(handleApiError(error, 'Failed to add to waitlist'));
+        }
+    }
+}
+
+// ========================================================
+// !ADDSTEALS - Add steals to user (Owner only)
+// ========================================================
+
+else if (command === '!addsteals') {
+    if (!isOwner) {
+        return message.reply('❌ This command is owner-only!');
+    }
+    
+    const userMention = args[1];
+    const amount = parseInt(args[2]);
+    
+    if (!userMention || !amount) {
+        return message.reply('**Usage:** `!addsteals <@user> <amount>`\n**Example:** `!addsteals @User 5`');
+    }
+    
+    if (isNaN(amount) || amount <= 0) {
+        return message.reply('❌ Amount must be a positive number!');
+    }
+    
+    const discordId = userMention.replace(/[<@!>]/g, '');
+    
+    try {
+        const response = await axios.post(`${RAILWAY_URL}/waitlist/addsteals`, {
+            discordId,
+            amount,
+            apiKey: API_KEY
+        });
+        
+        const user = response.data.user;
+        
+        const embed = new EmbedBuilder()
+            .setTitle('✅ Steals Added')
+            .setColor(0x00ff00)
+            .addFields(
+                { name: 'User', value: `<@${discordId}>`, inline: true },
+                { name: 'Amount Added', value: `+${amount}`, inline: true },
+                { name: 'Total Steals', value: `**${user.steals}**`, inline: true },
+                { name: 'Position', value: `\`${user.position}\``, inline: true }
+            )
+            .setTimestamp();
+        
+        message.reply({ embeds: [embed] });
+    } catch (error) {
+        console.error('Error adding steals:', error);
+        if (error.response && error.response.status === 404) {
+            message.reply('❌ User not found in waitlist! Use `!addwaitlist` first.');
+        } else {
+            message.reply(handleApiError(error, 'Failed to add steals'));
+        }
+    }
+}
+
+// ========================================================
+// !REMOVESTEALS - Remove steals from user (Owner only)
+// ========================================================
+
+else if (command === '!removesteals') {
+    if (!isOwner) {
+        return message.reply('❌ This command is owner-only!');
+    }
+    
+    const userMention = args[1];
+    const amount = parseInt(args[2]) || 1;
+    
+    if (!userMention) {
+        return message.reply('**Usage:** `!removesteals <@user> [amount]`\n**Example:** `!removesteals @User 2`\n*Default amount: 1*');
+    }
+    
+    if (amount <= 0) {
+        return message.reply('❌ Amount must be a positive number!');
+    }
+    
+    const discordId = userMention.replace(/[<@!>]/g, '');
+    
+    try {
+        const response = await axios.post(`${RAILWAY_URL}/waitlist/usesteals`, {
+            discordId,
+            amount
+        });
+        
+        const { removed, user } = response.data;
+        
+        if (removed) {
+            // Remove buyer role
+            if (BUYER_ROLE_ID) {
+                try {
+                    const member = await message.guild.members.fetch(discordId);
+                    await member.roles.remove(BUYER_ROLE_ID);
+                    console.log(`✅ Removed buyer role from ${member.user.tag}`);
+                } catch (err) {
+                    console.error('Failed to remove buyer role:', err);
+                }
+            }
+            
+            const embed = new EmbedBuilder()
+                .setTitle('⚠️ User Removed from Waitlist')
+                .setColor(0xff0000)
+                .setDescription(`<@${discordId}> ran out of steals and was removed from the waitlist.`)
+                .addFields(
+                    { name: 'Final Steals', value: '`0`' },
+                    { name: 'Buyer Role', value: '❌ Removed' }
+                )
+                .setTimestamp();
+            
+            // Try to DM the user
+            try {
+                const member = await message.guild.members.fetch(discordId);
+                await member.send(`⚠️ You have been removed from the SAB waitlist because you ran out of steals. Contact an admin to purchase more steals and rejoin.`);
+            } catch (err) {
+                console.log('Could not DM user about removal');
+            }
+            
+            message.reply({ embeds: [embed] });
+        } else {
+            const embed = new EmbedBuilder()
+                .setTitle('📉 Steals Removed')
+                .setColor(0xff9900)
+                .addFields(
+                    { name: 'User', value: `<@${discordId}>`, inline: true },
+                    { name: 'Amount Removed', value: `-${amount}`, inline: true },
+                    { name: 'Remaining Steals', value: `**${user.steals}**`, inline: true },
+                    { name: 'Position', value: `\`${user.position}\``, inline: true }
+                )
+                .setTimestamp();
+            
+            if (user.steals <= 3 && user.steals > 0) {
+                embed.setDescription(`⚠️ **Low steals warning!** Only ${user.steals} steal(s) remaining.`);
+            }
+            
+            message.reply({ embeds: [embed] });
+        }
+    } catch (error) {
+        console.error('Error removing steals:', error);
+        if (error.response && error.response.status === 404) {
+            message.reply('❌ User not found in waitlist!');
+        } else {
+            message.reply(handleApiError(error, 'Failed to remove steals'));
+        }
+    }
+}
+
+// ========================================================
+// !HELP - Command list (ANYONE CAN USE)
+// ========================================================
+
+else if (command === '!help') {
+    const userCommands = new EmbedBuilder()
+        .setTitle('📋 SAB Waitlist Bot - User Commands')
+        .setColor(0x00ffff)
+        .setDescription('Commands available to users with the **Buyer** role:')
+        .addFields(
+            { name: '!joinserver', value: '🎮 Get a clickable link to join the SAB server', inline: false },
+            { name: '!waitlist', value: '⏳ View the current waitlist status and positions', inline: false },
+            { name: '!steals [@user]', value: '📊 Check steal count for yourself or another user', inline: false },
+            { name: '!slots', value: '👥 View all active players currently in the server', inline: false }
+        )
+        .setFooter({ text: 'Use !help to see this menu again' })
+        .setTimestamp();
+    
+    if (isOwner) {
+        const ownerCommands = new EmbedBuilder()
+            .setTitle('🔧 SAB Waitlist Bot - Owner Commands')
+            .setColor(0xff6b6b)
+            .setDescription('Commands available to server owners only:')
+            .addFields(
+                { name: '!whitelist <username>', value: 'Add a Roblox user to the exempt list (won\'t be kicked)', inline: false },
+                { name: '!unwhitelist <username>', value: 'Remove a Roblox user from the exempt list', inline: false },
+                { name: '!addwaitlist <@user> <brainrot> [steals]', value: 'Add a user to the waitlist with initial steals', inline: false },
+                { name: '!addsteals <@user> <amount>', value: 'Add steals to a user\'s account', inline: false },
+                { name: '!removesteals <@user> [amount]', value: 'Remove steals from a user (default: 1)', inline: false }
+            )
+            .setFooter({ text: 'Owner commands require API key configuration' })
+            .setTimestamp();
+        
+        message.reply({ embeds: [userCommands, ownerCommands] });
+    } else {
+        message.reply({ embeds: [userCommands] });
+    }
+}
+```
+
+});
+
+client.login(process.env.DISCORD_BOT_TOKEN).catch(error => {
+console.error(‘❌ Failed to login to Discord:’, error.message);
+process.exit(1);
+});
+
+// Handle Discord client errors
+client.on(‘error’, error => {
+console.error(‘❌ Discord client error:’, error);
+});
+
+// Handle warnings
+client.on(‘warn’, warning => {
+console.warn(‘⚠️ Discord warning:’, warning);
+});
 
 // Graceful shutdown
-process.on('SIGTERM', () => {
-    console.log('📴 SIGTERM received, shutting down gracefully...');
-    process.exit(0);
+process.on(‘SIGTERM’, () => {
+console.log(‘📴 SIGTERM received, shutting down bot…’);
+client.destroy();
+process.exit(0);
 });
 
-process.on('SIGINT', () => {
-    console.log('📴 SIGINT received, shutting down gracefully...');
-    process.exit(0);
-});
-
-// ========================================================
-// SERVER START
-// ========================================================
-
-app.listen(port, () => {
-    console.log('═══════════════════════════════════════');
-    console.log(`🚀 SAB Waitlist Server Running`);
-    console.log(`📡 Port: ${port}`);
-    console.log(`📋 JobId: ${currentJobId || 'Not set'}`);
-    console.log(`🔑 API Key: ${process.env.API_KEY ? 'Configured ✓' : 'Not Set ✗'}`);
-    console.log(`✅ Server Ready!`);
-    console.log('═══════════════════════════════════════');
+process.on(‘SIGINT’, () => {
+console.log(‘📴 SIGINT received, shutting down bot…’);
+client.destroy();
+process.exit(0);
 });
