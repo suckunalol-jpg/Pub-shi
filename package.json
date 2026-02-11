@@ -1,10 +1,9 @@
 {
   "name": "sab-waitlist-system",
   "version": "2.0.0",
-  "description": "SAB Waitlist Management System with Discord Integration",
-  "main": "start.js",
+  "main": "index.js",
   "scripts": {
-    "start": "node start.js"
+    "start": "node index.js"
   },
   "dependencies": {
     "axios": "^1.6.0",
