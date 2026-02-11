@@ -10,7 +10,7 @@ const client = new Client({
     ]
 });
 
-const RAILWAY_URL = process.env.RAILWAY_URL || 'https://your-railway-url.up.railway.app';
+const RAILWAY_URL = process.env.RAILWAY_URL || 'https://pub-shi-production.up.railway.app';
 const API_KEY = process.env.API_KEY;
 const OWNER_IDS = process.env.OWNER_IDS.split(',');
 const BUYER_ROLE_ID = process.env.BUYER_ROLE_ID; // Role to remove when steals reach 0
