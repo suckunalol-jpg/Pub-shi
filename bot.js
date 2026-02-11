@@ -12,11 +12,34 @@ const client = new Client({
 
 const RAILWAY_URL = process.env.RAILWAY_URL || 'https://pub-shi-production.up.railway.app';
 const API_KEY = process.env.API_KEY;
-const OWNER_IDS = process.env.OWNER_IDS.split(',');
-const BUYER_ROLE_ID = process.env.BUYER_ROLE_ID; // Role to remove when steals reach 0
+const OWNER_IDS = process.env.OWNER_IDS ? process.env.OWNER_IDS.split(',') : [];
+const BUYER_ROLE_ID = process.env.BUYER_ROLE_ID || ''; // Role to remove when steals reach 0
+
+// Check for required environment variables
+if (!process.env.DISCORD_BOT_TOKEN) {
+    console.error('❌ DISCORD_BOT_TOKEN is not set!');
+    process.exit(1);
+}
+
+if (!API_KEY) {
+    console.warn('⚠️ API_KEY is not set! Some commands may not work.');
+}
+
+if (OWNER_IDS.length === 0) {
+    console.warn('⚠️ OWNER_IDS is not set! Owner commands will not work for anyone.');
+}
+
+if (!BUYER_ROLE_ID) {
+    console.warn('⚠️ BUYER_ROLE_ID is not set! Role management will not work.');
+}
 
 client.on('ready', () => {
     console.log(`✅ SAB Bot logged in as ${client.user.tag}`);
+    console.log(`📋 Config Check:`);
+    console.log(`   - Railway URL: ${RAILWAY_URL}`);
+    console.log(`   - API Key: ${API_KEY ? 'Set ✓' : 'Not Set ✗'}`);
+    console.log(`   - Owner IDs: ${OWNER_IDS.length > 0 ? OWNER_IDS.join(', ') : 'None ✗'}`);
+    console.log(`   - Buyer Role ID: ${BUYER_ROLE_ID || 'Not Set ✗'}`);
     client.user.setActivity('SAB Waitlist System', { type: 'WATCHING' });
 });
 
@@ -24,7 +47,7 @@ client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
     
     const isOwner = OWNER_IDS.includes(message.author.id);
-    const hasBuyerRole = message.member.roles.cache.has(BUYER_ROLE_ID);
+    const hasBuyerRole = BUYER_ROLE_ID ? message.member.roles.cache.has(BUYER_ROLE_ID) : false;
     
     const args = message.content.split(' ');
     const command = args[0].toLowerCase();
