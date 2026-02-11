@@ -168,10 +168,14 @@ client.on('messageCreate', async (message) => {
     }
     
     // ========================================================
-    // !JOINSERVER - Get clickable join link
+    // !JOINSERVER - Get clickable join link (BUYER ROLE REQUIRED)
     // ========================================================
     
     else if (command === '!joinserver') {
+        if (!hasBuyerRole && !isOwner) {
+            return message.reply('❌ You need the Buyer role to use this command!');
+        }
+        
         try {
             const response = await axios.get(`${RAILWAY_URL}/getjobid`);
             const jobId = response.data.jobId;
@@ -200,10 +204,14 @@ client.on('messageCreate', async (message) => {
     }
     
     // ========================================================
-    // !WAITLIST - Show current waitlist
+    // !WAITLIST - Show current waitlist (BUYER ROLE REQUIRED)
     // ========================================================
     
     else if (command === '!waitlist') {
+        if (!hasBuyerRole && !isOwner) {
+            return message.reply('❌ You need the Buyer role to use this command!');
+        }
+        
         try {
             const response = await axios.get(`${RAILWAY_URL}/waitlist/list`);
             const { active, waiting, activeCount, waitingCount } = response.data;
@@ -243,10 +251,14 @@ client.on('messageCreate', async (message) => {
     }
     
     // ========================================================
-    // !STEALS - Show steals for specific user or all
+    // !STEALS - Show steals for specific user or all (BUYER ROLE REQUIRED)
     // ========================================================
     
     else if (command === '!steals') {
+        if (!hasBuyerRole && !isOwner) {
+            return message.reply('❌ You need the Buyer role to use this command!');
+        }
+        
         const userId = args[1] ? args[1].replace(/[<@!>]/g, '') : message.author.id;
         
         try {
@@ -456,10 +468,10 @@ client.on('messageCreate', async (message) => {
             .setTitle('📋 SAB Waitlist Bot Commands')
             .setColor(0x00ffff)
             .addFields(
+                { name: '\u200B', value: '**Buyer Role Commands:**' },
                 { name: '!joinserver', value: 'Get clickable link to join the server' },
                 { name: '!waitlist', value: 'View current waitlist status' },
                 { name: '!steals [@user]', value: 'Check steals for yourself or another user' },
-                { name: '\u200B', value: '**Buyer Role Commands:**' },
                 { name: '!slots', value: 'View all active players with details' },
                 { name: '\u200B', value: '**Owner Commands:**' },
                 { name: '!whitelist <username>', value: 'Add Roblox user to exempt list' },
