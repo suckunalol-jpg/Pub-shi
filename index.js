@@ -115,6 +115,27 @@ app.get('/exempt/list', (req, res) => {
 });
 
 // ========================================================
+// WHITELIST CHECK (for Roblox game)
+// ========================================================
+
+app.get('/checkwhitelist', (req, res) => {
+    const username = req.query.username;
+    
+    if (!username) {
+        return res.status(400).json({ error: 'Username required' });
+    }
+    
+    const isWhitelisted = exemptList.has(username.toLowerCase());
+    
+    console.log(`🔍 Whitelist check for ${username}: ${isWhitelisted}`);
+    
+    res.json({ 
+        isWhitelisted,
+        username 
+    });
+});
+
+// ========================================================
 // WAITLIST MANAGEMENT
 // ========================================================
 
