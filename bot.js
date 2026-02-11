@@ -24,16 +24,18 @@ client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
     
     const isOwner = OWNER_IDS.includes(message.author.id);
+    const hasBuyerRole = message.member.roles.cache.has(BUYER_ROLE_ID);
+    
     const args = message.content.split(' ');
     const command = args[0].toLowerCase();
     
     // ========================================================
-    // !SLOTS - Show all active players (Owner only)
+    // !SLOTS - Show all active players (BUYER ROLE REQUIRED)
     // ========================================================
     
     if (command === '!slots') {
-        if (!isOwner) {
-            return message.reply('❌ This command is owner-only!');
+        if (!hasBuyerRole && !isOwner) {
+            return message.reply('❌ You need the Buyer role to use this command!');
         }
         
         try {
@@ -77,10 +79,14 @@ client.on('messageCreate', async (message) => {
     }
     
     // ========================================================
-    // !WHITELIST - Add user to exempt list
+    // !WHITELIST - Add user to exempt list (OWNER ONLY)
     // ========================================================
     
     else if (command === '!whitelist') {
+        if (!isOwner) {
+            return message.reply('❌ This command is owner-only!');
+        }
+        
         const username = args[1];
         
         if (!username) {
@@ -102,6 +108,39 @@ client.on('messageCreate', async (message) => {
             message.reply({ embeds: [embed] });
         } catch (error) {
             message.reply('❌ Failed to whitelist: ' + error.message);
+        }
+    }
+    
+    // ========================================================
+    // !UNWHITELIST - Remove from exempt list (OWNER ONLY)
+    // ========================================================
+    
+    else if (command === '!unwhitelist') {
+        if (!isOwner) {
+            return message.reply('❌ This command is owner-only!');
+        }
+        
+        const username = args[1];
+        
+        if (!username) {
+            return message.reply('Usage: `!unwhitelist <roblox_username>`');
+        }
+        
+        try {
+            await axios.post(`${RAILWAY_URL}/exempt/remove`, {
+                username,
+                apiKey: API_KEY
+            });
+            
+            const embed = new EmbedBuilder()
+                .setTitle('✅ User Removed from Whitelist')
+                .setColor(0xff9900)
+                .addFields({ name: 'Roblox Username', value: username })
+                .setTimestamp();
+            
+            message.reply({ embeds: [embed] });
+        } catch (error) {
+            message.reply('❌ Failed to remove from whitelist: ' + error.message);
         }
     }
     
@@ -394,12 +433,14 @@ client.on('messageCreate', async (message) => {
             .setTitle('📋 SAB Waitlist Bot Commands')
             .setColor(0x00ffff)
             .addFields(
-                { name: '!whitelist <username>', value: 'Add Roblox user to exempt list' },
                 { name: '!joinserver', value: 'Get clickable link to join the server' },
                 { name: '!waitlist', value: 'View current waitlist status' },
                 { name: '!steals [@user]', value: 'Check steals for yourself or another user' },
-                { name: '\u200B', value: '**Owner Commands:**' },
+                { name: '\u200B', value: '**Buyer Role Commands:**' },
                 { name: '!slots', value: 'View all active players with details' },
+                { name: '\u200B', value: '**Owner Commands:**' },
+                { name: '!whitelist <username>', value: 'Add Roblox user to exempt list' },
+                { name: '!unwhitelist <username>', value: 'Remove Roblox user from exempt list' },
                 { name: '!addwaitlist <@user> <brainrot> [steals]', value: 'Add user to waitlist' },
                 { name: '!addsteals <@user> <amount>', value: 'Add steals to a user' },
                 { name: '!removesteals <@user> [amount]', value: 'Remove steals from a user' }
