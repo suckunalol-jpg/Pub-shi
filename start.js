@@ -220,7 +220,7 @@ app.listen(port, () => {
 
 const RAILWAY_URL = process.env.RAILWAY_URL || 'https://pub-shi-production.up.railway.app';
 const API_KEY = process.env.API_KEY;
-const OWNER_IDS = process.env.OWNER_IDS ? process.env.OWNER_IDS.split(',').map(id => id.trim()) : [];
+const OWNER_ROLE_ID = process.env.OWNER_ROLE_ID || '';
 const BUYER_ROLE_ID = process.env.BUYER_ROLE_ID || '';
 
 if (!process.env.DISCORD_BOT_TOKEN) {
@@ -228,7 +228,7 @@ if (!process.env.DISCORD_BOT_TOKEN) {
     process.exit(1);
 }
 if (!API_KEY) console.warn('⚠️ API_KEY is not set!');
-if (OWNER_IDS.length === 0) console.warn('⚠️ OWNER_IDS is not set!');
+if (!OWNER_ROLE_ID) console.warn('⚠️ OWNER_ROLE_ID is not set!');
 if (!BUYER_ROLE_ID) console.warn('⚠️ BUYER_ROLE_ID is not set!');
 
 const client = new Client({
@@ -259,7 +259,7 @@ client.on('ready', () => {
     console.log(`✅ Bot logged in as ${client.user.tag}`);
     console.log(`   Railway URL: ${RAILWAY_URL}`);
     console.log(`   API Key: ${API_KEY ? 'Set ✓' : 'Not Set ✗'}`);
-    console.log(`   Owner IDs: ${OWNER_IDS.length > 0 ? OWNER_IDS.join(', ') : 'None ✗'}`);
+    console.log(`   Owner Role: ${OWNER_ROLE_ID || 'Not Set ✗'}`);
     console.log(`   Buyer Role: ${BUYER_ROLE_ID || 'Not Set ✗'}`);
     console.log('═══════════════════════════════════════');
     client.user.setActivity('SAB Waitlist System', { type: 3 });
@@ -270,7 +270,9 @@ client.on('messageCreate', async (message) => {
     if (!message.guild) return;
     if (!message.content.startsWith('!')) return;
 
-    const isOwner = OWNER_IDS.includes(message.author.id);
+    const isOwner = OWNER_ROLE_ID && message.member
+        ? message.member.roles.cache.has(OWNER_ROLE_ID)
+        : false;
     const hasBuyerRole = BUYER_ROLE_ID && message.member
         ? message.member.roles.cache.has(BUYER_ROLE_ID)
         : false;
